@@ -24,6 +24,9 @@ START = date(2022, 5, 9)          # Monday, ~4 years before 2026-05-13
 MORNING_START = time(6, 0)
 MORNING_END = time(10, 0)         # exclusive
 
+# Status labels that don't represent an active morning-commute disruption
+EXCLUDED_STATUS = {"station-notice", "planned-work"}
+
 
 def fetch_data_end() -> date:
     """Latest NYCT Subway alert date in the dataset (data has a publishing lag)."""
@@ -68,6 +71,13 @@ def fetch_alerts(end: date) -> pd.DataFrame:
         tokens = [t.strip() for t in str(s).split("|")]
         return "7" in tokens or "7X" in tokens
     df = df[df["affected"].apply(has_7)].copy()
+    # Drop excluded status labels (incl. compound labels containing them)
+    def is_excluded(s: str) -> bool:
+        tokens = {t.strip() for t in str(s).split("|")}
+        return bool(tokens & EXCLUDED_STATUS)
+    excluded_mask = df["status_label"].apply(is_excluded)
+    print(f"  dropping {excluded_mask.sum()} alert rows with excluded status labels", flush=True)
+    df = df[~excluded_mask].copy()
     df["date"] = pd.to_datetime(df["date"])  # naive, treat as ET
     return df
 
