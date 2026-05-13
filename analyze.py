@@ -18,17 +18,40 @@ import pandas as pd
 import requests
 
 DATASET_URL = "https://data.ny.gov/resource/7kct-peq7.csv"
+DATASET_JSON = "https://data.ny.gov/resource/7kct-peq7.json"
 START = date(2022, 5, 9)          # Monday, ~4 years before 2026-05-13
-END = date(2026, 5, 11)           # Monday on/before today; last full reportable week boundary
 
 MORNING_START = time(6, 0)
 MORNING_END = time(10, 0)         # exclusive
 
 
-def fetch_alerts() -> pd.DataFrame:
-    """Fetch all NYCT Subway alerts mentioning the 7 line since START."""
+def fetch_data_end() -> date:
+    """Latest NYCT Subway alert date in the dataset (data has a publishing lag)."""
+    r = requests.get(
+        DATASET_JSON,
+        params={"$select": "max(date) as m", "agency": "NYCT Subway"},
+        timeout=60,
+    )
+    r.raise_for_status()
+    return pd.to_datetime(r.json()[0]["m"]).date()
+
+
+def last_full_friday(through: date) -> date:
+    """Friday of the last Mon-Fri week fully covered by `through`."""
+    # Need data through Friday of the target week
+    wd = through.weekday()  # Mon=0 ... Sun=6
+    if wd >= 4:  # Fri (4), Sat (5), Sun (6) — this week's Friday is covered
+        return through - timedelta(days=wd - 4)
+    # Mon (0)..Thu (3): only previous week is fully covered
+    return through - timedelta(days=wd + 3)
+
+
+def fetch_alerts(end: date) -> pd.DataFrame:
+    """Fetch all NYCT Subway alerts mentioning the 7 line in [START, end]."""
     where = (
-        f"affected like '%7%' AND date >= '{START.isoformat()}T00:00:00'"
+        f"affected like '%7%' "
+        f"AND date >= '{START.isoformat()}T00:00:00' "
+        f"AND date < '{(end + timedelta(days=1)).isoformat()}T00:00:00'"
     )
     params = {
         "$select": "alert_id,event_id,update_number,date,status_label,affected",
@@ -59,9 +82,9 @@ def event_windows(df: pd.DataFrame) -> pd.DataFrame:
     return grp
 
 
-def disrupted_weekdays(events: pd.DataFrame) -> pd.DataFrame:
-    """For every weekday in [START, END], compute whether any event overlapped 6-10am ET."""
-    weekdays = pd.bdate_range(START, END).date  # Mon-Fri only, federal holidays NOT excluded here
+def disrupted_weekdays(events: pd.DataFrame, end: date) -> pd.DataFrame:
+    """For every weekday in [START, end], compute whether any event overlapped 6-10am ET."""
+    weekdays = pd.bdate_range(START, end).date  # Mon-Fri only, federal holidays NOT excluded here
     rows = []
     # Pre-build morning intervals as tuples of pd.Timestamp
     morning = []
@@ -107,7 +130,7 @@ def weekly_probability(daily: pd.DataFrame) -> pd.DataFrame:
     return weekly
 
 
-def plot(weekly: pd.DataFrame, out_path: str) -> None:
+def plot(weekly: pd.DataFrame, data_end: date, out_path: str) -> None:
     fig, ax = plt.subplots(figsize=(14, 5.5))
     ax.plot(
         weekly["week_start"], weekly["probability"],
@@ -124,7 +147,8 @@ def plot(weekly: pd.DataFrame, out_path: str) -> None:
     ax.set_xlabel("Week (starting Monday)")
     ax.set_title(
         "NYC 7 Train — Weekday Morning Commute Disruption Probability\n"
-        "Any NYCT Subway service alert affecting 7/7X active during 6–10am ET",
+        f"Any NYCT Subway service alert affecting 7/7X active during 6–10am ET "
+        f"(data through {data_end:%Y-%m-%d})",
         fontsize=12,
     )
     ax.grid(True, alpha=0.3)
@@ -136,19 +160,22 @@ def plot(weekly: pd.DataFrame, out_path: str) -> None:
 
 
 def main() -> int:
-    print("fetching alerts...", flush=True)
-    df = fetch_alerts()
+    data_end = fetch_data_end()
+    end = last_full_friday(data_end)
+    print(f"dataset latest NYCT Subway alert: {data_end}")
+    print(f"trimming to last full Mon-Fri week ending: {end}")
+    df = fetch_alerts(end)
     print(f"  {len(df):,} alert rows after 7/7X token filter", flush=True)
     events = event_windows(df)
     print(f"  {len(events):,} distinct events", flush=True)
-    daily = disrupted_weekdays(events)
+    daily = disrupted_weekdays(events, end)
     print(f"  {len(daily):,} weekdays scanned; {daily['disrupted'].sum():,} disrupted", flush=True)
     weekly = weekly_probability(daily)
     weekly_out = weekly[["week_start", "disrupted_days", "total_days", "probability"]].copy()
     weekly_out["week_start"] = weekly_out["week_start"].dt.date
     weekly_out.to_csv("weekly_disruption.csv", index=False)
     print(f"wrote weekly_disruption.csv ({len(weekly_out)} weeks)")
-    plot(weekly, "weekly_disruption.png")
+    plot(weekly, data_end, "weekly_disruption.png")
     return 0
 
 
